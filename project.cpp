@@ -54,38 +54,46 @@ int computeDynamicQuantum(const vector<Process>& longQ) {
 void printGanttChart(const vector<Gantt>& chart) {
     if (chart.empty()) return;
 
-    // Top border
+    // 1. Calculate widths and labels
+    vector<int> widths;
+    vector<string> labels;
     for (auto& g : chart) {
-        int width = max(5, (int)(" P" + to_string(g.pid) + " ").length() + 1);
+        string label = " P" + to_string(g.pid);
+        if (!g.queueName.empty()) {
+            if (g.queueName.find("RR") != string::npos) label += "(RR)";
+            else label += "(SJF)";
+        }
+        labels.push_back(label);
+        widths.push_back(max(7, (int)label.length() + 2));
+    }
+
+    // 2. Top border
+    for (int w : widths) {
         cout << "+";
-        for (int i = 0; i < width; i++) cout << "-";
+        for (int i = 0; i < w; i++) cout << "-";
     }
     cout << "+\n";
 
-    // Process IDs
-    for (auto& g : chart) {
-        int width = max(5, (int)(" P" + to_string(g.pid) + " ").length() + 1);
-        string label = " P" + to_string(g.pid) + " ";
-        int pad = width - (int)label.length();
-        cout << "|" << label;
-        for (int i = 0; i < pad; i++) cout << " ";
+    // 3. Labels
+    for (int i = 0; i < (int)chart.size(); i++) {
+        int pad = widths[i] - (int)labels[i].length();
+        cout << "|" << labels[i];
+        for (int j = 0; j < pad; j++) cout << " ";
     }
     cout << "|\n";
 
-    // Bottom border
-    for (auto& g : chart) {
-        int width = max(5, (int)(" P" + to_string(g.pid) + " ").length() + 1);
+    // 4. Bottom border
+    for (int w : widths) {
         cout << "+";
-        for (int i = 0; i < width; i++) cout << "-";
+        for (int i = 0; i < w; i++) cout << "-";
     }
     cout << "+\n";
 
-    // Time markers
+    // 5. Time markers
     cout << chart[0].start;
-    for (auto& g : chart) {
-        int width = max(5, (int)(" P" + to_string(g.pid) + " ").length() + 1);
-        string endStr = to_string(g.end);
-        for (int i = 0; i < width + 1 - (int)endStr.length(); i++) cout << " ";
+    for (int i = 0; i < (int)chart.size(); i++) {
+        string endStr = to_string(chart[i].end);
+        for (int j = 0; j < widths[i] + 1 - (int)endStr.length(); j++) cout << " ";
         cout << endStr;
     }
     cout << "\n";
@@ -138,108 +146,113 @@ int main() {
     for (auto& p : longQ) cout << "P" << p.pid << " ";
     cout << "\n---------------------------------------------\n";
 
-    // ── 3. Schedule Short Queue — Non-preemptive SJF ───────────────
-    //    Sort by arrival, then by burst (SJF).
+    // ── 3. Unified Scheduler — Interleaved Q1 (SJF) and Q2 (RR) ──────
+    // Requirement: Run 1 task from Q2 after every 2 tasks from Q1.
 
+    int time = 0;
+    int q1Counter = 0;
+    int finishedTotal = 0;
+    int totalProcs = (int)procs.size();
+
+    vector<Gantt> ganttSJF, ganttRR;
+    deque<int> readyQ_RR;                 // indices into longQ
+    vector<bool> inQueue_RR(longQ.size(), false);
+    vector<bool> done_SJF(shortQ.size(), false);
+
+    // Sort shortQ by arrival for easier access if needed, but the SJF search handles it
     sort(shortQ.begin(), shortQ.end(), [](const Process& a, const Process& b) {
         if (a.arrival != b.arrival) return a.arrival < b.arrival;
         return a.burst < b.burst;
     });
 
-    int time = 0;
-    vector<Gantt> ganttSJF;
-
-    vector<bool> done(shortQ.size(), false);
-    int finished = 0;
-    while (finished < (int)shortQ.size()) {
-        // Find shortest available job
-        int best = -1;
-        for (int i = 0; i < (int)shortQ.size(); i++) {
-            if (!done[i] && shortQ[i].arrival <= time) {
-                if (best == -1 || shortQ[i].burst < shortQ[best].burst)
-                    best = i;
-            }
-        }
-        if (best == -1) {
-            // advance time to next arrival
-            int nextArr = INT_MAX;
-            for (int i = 0; i < (int)shortQ.size(); i++)
-                if (!done[i]) nextArr = min(nextArr, shortQ[i].arrival);
-            time = nextArr;
-            continue;
-        }
-        int start = time;
-        time += shortQ[best].burst;
-        shortQ[best].remaining   = 0;
-        shortQ[best].completion  = time;
-        shortQ[best].turnaround  = time - shortQ[best].arrival;
-        shortQ[best].waiting     = shortQ[best].turnaround - shortQ[best].burst;
-        done[best] = true;
-        finished++;
-        ganttSJF.push_back({shortQ[best].pid, start, time, "SJF"});
-    }
-
-    // ── 4. Schedule Long Queue — Dynamic Round Robin ───────────────
-    //    Processes in longQ start being eligible from max(their arrival, SJF-end)
-
-    // Sort by arrival for the ready-queue logic
+    // Sort longQ by arrival initially for the ready queue logic
     sort(longQ.begin(), longQ.end(), [](const Process& a, const Process& b) {
         return a.arrival < b.arrival;
     });
 
-    vector<Gantt> ganttRR;
-    deque<int> readyQ;                 // indices into longQ
-    vector<bool> inQueue(longQ.size(), false);
-    int completedRR = 0;
-
-    // Enqueue processes that have arrived by 'time'
-    auto enqueueArrivals = [&](int upTo) {
+    auto enqueueRR = [&](int upTo) {
         for (int i = 0; i < (int)longQ.size(); i++) {
-            if (!inQueue[i] && longQ[i].remaining > 0 && longQ[i].arrival <= upTo) {
-                readyQ.push_back(i);
-                inQueue[i] = true;
+            if (!inQueue_RR[i] && longQ[i].remaining > 0 && longQ[i].arrival <= upTo) {
+                readyQ_RR.push_back(i);
+                inQueue_RR[i] = true;
             }
         }
     };
 
-    enqueueArrivals(time);
+    while (finishedTotal < totalProcs) {
+        // Enqueue arrivals in RR
+        enqueueRR(time);
 
-    while (completedRR < (int)longQ.size()) {
-        if (readyQ.empty()) {
+        // Find shortest available SJF job
+        int bestSJF = -1;
+        for (int i = 0; i < (int)shortQ.size(); i++) {
+            if (!done_SJF[i] && shortQ[i].arrival <= time) {
+                if (bestSJF == -1 || shortQ[i].burst < shortQ[bestSJF].burst)
+                    bestSJF = i;
+            }
+        }
+
+        bool runSJF = false;
+        bool runRR = false;
+
+        // Decision logic: Q1 gets priority until 2 tasks are run, then Q2 gets a turn if available
+        if (q1Counter < 2 && bestSJF != -1) {
+            runSJF = true;
+        } else if (!readyQ_RR.empty()) {
+            runRR = true;
+        } else if (bestSJF != -1) {
+            runSJF = true;
+        }
+
+        if (runSJF) {
+            int start = time;
+            time += shortQ[bestSJF].burst;
+            shortQ[bestSJF].remaining = 0;
+            shortQ[bestSJF].completion = time;
+            shortQ[bestSJF].turnaround = time - shortQ[bestSJF].arrival;
+            shortQ[bestSJF].waiting = shortQ[bestSJF].turnaround - shortQ[bestSJF].burst;
+            done_SJF[bestSJF] = true;
+            finishedTotal++;
+            q1Counter++;
+            ganttSJF.push_back({shortQ[bestSJF].pid, start, time, "SJF"});
+        } else if (runRR) {
+            int quantum = computeDynamicQuantum(longQ);
+            int idx = readyQ_RR.front();
+            readyQ_RR.pop_front();
+
+            int start = time;
+            int exec = min(quantum, longQ[idx].remaining);
+            time += exec;
+            longQ[idx].remaining -= exec;
+
+            ganttRR.push_back({longQ[idx].pid, start, time, "RR(q=" + to_string(quantum) + ")"});
+
+            // Enqueue arrivals during this slice
+            enqueueRR(time);
+
+            if (longQ[idx].remaining > 0) {
+                readyQ_RR.push_back(idx);
+            } else {
+                finishedTotal++;
+                inQueue_RR[idx] = false;
+                longQ[idx].completion = time;
+                longQ[idx].turnaround = time - longQ[idx].arrival;
+                longQ[idx].waiting = longQ[idx].turnaround - longQ[idx].burst;
+            }
+            q1Counter = 0; // Reset counter after RR slice
+        } else {
+            // Idle: jump to next arrival
             int nextArr = INT_MAX;
+            for (int i = 0; i < (int)shortQ.size(); i++)
+                if (!done_SJF[i]) nextArr = min(nextArr, shortQ[i].arrival);
             for (int i = 0; i < (int)longQ.size(); i++)
                 if (longQ[i].remaining > 0) nextArr = min(nextArr, longQ[i].arrival);
+
+            if (nextArr == INT_MAX) break;
             time = max(time, nextArr);
-            enqueueArrivals(time);
-            continue;
-        }
-
-        // Compute dynamic quantum based on current remaining bursts
-        int quantum = computeDynamicQuantum(longQ);
-
-        int idx = readyQ.front();
-        readyQ.pop_front();
-
-        int start = time;
-        int exec  = min(quantum, longQ[idx].remaining);
-        time += exec;
-        longQ[idx].remaining -= exec;
-
-        ganttRR.push_back({longQ[idx].pid, start, time, "RR(q=" + to_string(quantum) + ")"});
-
-        // Enqueue newly arrived processes before re-adding current
-        enqueueArrivals(time);
-
-        if (longQ[idx].remaining > 0) {
-            readyQ.push_back(idx);
-        } else {
-            completedRR++;
-            inQueue[idx] = false;
-            longQ[idx].completion  = time;
-            longQ[idx].turnaround  = time - longQ[idx].arrival;
-            longQ[idx].waiting     = longQ[idx].turnaround - longQ[idx].burst;
         }
     }
+
 
     // ── 5. Merge results back & build combined Gantt chart ─────────
     // Write completion data back into the master array
@@ -263,6 +276,9 @@ int main() {
     vector<Gantt> combined;
     combined.insert(combined.end(), ganttSJF.begin(), ganttSJF.end());
     combined.insert(combined.end(), ganttRR.begin(),  ganttRR.end());
+    sort(combined.begin(), combined.end(), [](const Gantt& a, const Gantt& b) {
+        return a.start < b.start;
+    });
 
     // ── 6. Output ──────────────────────────────────────────────────
 

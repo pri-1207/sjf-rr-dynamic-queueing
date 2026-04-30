@@ -35,110 +35,127 @@ export const runScheduler = (inputProcesses) => {
   const longQ = processes.filter(p => p.burst > threshold).map(p => ({ ...p, queue: 2 }));
 
   let time = 0;
+  let q1Counter = 0;
+  let finishedTotal = 0;
+  const totalProcs = processes.length;
   const gantt = [];
   const results = [];
 
-  // --- 1. Schedule Short Queue (SJF) ---
+  // Prepare SJF processes
   const sjfProcs = [...shortQ].sort((a, b) => {
     if (a.arrival !== b.arrival) return a.arrival - b.arrival;
     return a.burst - b.burst;
   });
-
   const sjfDone = new Array(sjfProcs.length).fill(false);
-  let sjfFinished = 0;
 
-  while (sjfFinished < sjfProcs.length) {
-    let best = -1;
-    for (let i = 0; i < sjfProcs.length; i++) {
-      if (!sjfDone[i] && sjfProcs[i].arrival <= time) {
-        if (best === -1 || sjfProcs[i].burst < sjfProcs[best].burst) {
-          best = i;
-        }
-      }
-    }
-
-    if (best === -1) {
-      const nextArrival = Math.min(...sjfProcs.filter((_, i) => !sjfDone[i]).map(p => p.arrival));
-      time = nextArrival;
-      continue;
-    }
-
-    const start = time;
-    const proc = sjfProcs[best];
-    time += proc.burst;
-    proc.remaining = 0;
-    proc.completion = time;
-    proc.turnaround = time - proc.arrival;
-    proc.waiting = proc.turnaround - proc.burst;
-    
-    sjfDone[best] = true;
-    sjfFinished++;
-    
-    gantt.push({
-      pid: proc.pid,
-      start,
-      end: time,
-      queue: 'SJF',
-      color: 'hsl(210, 80%, 60%)' // Blueish
-    });
-    results.push(proc);
-  }
-
-  // --- 2. Schedule Long Queue (Dynamic RR) ---
+  // Prepare RR processes
   const rrProcs = [...longQ].sort((a, b) => a.arrival - b.arrival);
-  const readyQ = [];
-  const inQueue = new Array(rrProcs.length).fill(false);
-  let rrFinished = 0;
+  const readyQ_RR = [];
+  const inQueue_RR = new Array(rrProcs.length).fill(false);
 
-  const enqueueArrivals = (currentTime) => {
+  const enqueueRR = (currentTime) => {
     for (let i = 0; i < rrProcs.length; i++) {
-      if (!inQueue[i] && rrProcs[i].remaining > 0 && rrProcs[i].arrival <= currentTime) {
-        readyQ.push(i);
-        inQueue[i] = true;
+      if (!inQueue_RR[i] && rrProcs[i].remaining > 0 && rrProcs[i].arrival <= currentTime) {
+        readyQ_RR.push(i);
+        inQueue_RR[i] = true;
       }
     }
   };
 
-  enqueueArrivals(time);
+  while (finishedTotal < totalProcs) {
+    enqueueRR(time);
 
-  while (rrFinished < rrProcs.length) {
-    if (readyQ.length === 0) {
-      const nextArrival = Math.min(...rrProcs.filter(p => p.remaining > 0).map(p => p.arrival));
-      time = Math.max(time, nextArrival);
-      enqueueArrivals(time);
-      continue;
+    let bestSJF = -1;
+    for (let i = 0; i < sjfProcs.length; i++) {
+      if (!sjfDone[i] && sjfProcs[i].arrival <= time) {
+        if (bestSJF === -1 || sjfProcs[i].burst < sjfProcs[bestSJF].burst) {
+          bestSJF = i;
+        }
+      }
     }
 
-    const quantum = computeDynamicQuantum(rrProcs);
-    const idx = readyQ.shift();
-    const proc = rrProcs[idx];
+    let runSJF = false;
+    let runRR = false;
 
-    const start = time;
-    const exec = Math.min(quantum, proc.remaining);
-    time += exec;
-    proc.remaining -= exec;
+    // Interleaving logic: Q1 priority for 2 tasks, then Q2 turn
+    if (q1Counter < 2 && bestSJF !== -1) {
+      runSJF = true;
+    } else if (readyQ_RR.length > 0) {
+      runRR = true;
+    } else if (bestSJF !== -1) {
+      runSJF = true;
+    }
 
-    gantt.push({
-      pid: proc.pid,
-      start,
-      end: time,
-      queue: `RR (q=${quantum})`,
-      color: 'hsl(280, 70%, 60%)' // Purpleish
-    });
-
-    enqueueArrivals(time);
-
-    if (proc.remaining > 0) {
-      readyQ.push(idx);
-    } else {
-      rrFinished++;
-      inQueue[idx] = false;
+    if (runSJF) {
+      const start = time;
+      const proc = sjfProcs[bestSJF];
+      time += proc.burst;
+      proc.remaining = 0;
       proc.completion = time;
       proc.turnaround = time - proc.arrival;
       proc.waiting = proc.turnaround - proc.burst;
+      
+      sjfDone[bestSJF] = true;
+      finishedTotal++;
+      q1Counter++;
+      
+      gantt.push({
+        pid: proc.pid,
+        start,
+        end: time,
+        queue: 'SJF',
+        color: 'hsl(210, 80%, 60%)' // Blueish
+      });
       results.push(proc);
+    } else if (runRR) {
+      const quantum = computeDynamicQuantum(rrProcs);
+      const idx = readyQ_RR.shift();
+      const proc = rrProcs[idx];
+
+      const start = time;
+      const exec = Math.min(quantum, proc.remaining);
+      time += exec;
+      proc.remaining -= exec;
+
+      gantt.push({
+        pid: proc.pid,
+        start,
+        end: time,
+        queue: `RR (q=${quantum})`,
+        color: 'hsl(280, 70%, 60%)' // Purpleish
+      });
+
+      enqueueRR(time);
+
+      if (proc.remaining > 0) {
+        readyQ_RR.push(idx);
+      } else {
+        finishedTotal++;
+        inQueue_RR[idx] = false;
+        proc.completion = time;
+        proc.turnaround = time - proc.arrival;
+        proc.waiting = proc.turnaround - proc.burst;
+        results.push(proc);
+      }
+      q1Counter = 0; // Reset after RR turn
+    } else {
+      // Idle: jump to next arrival
+      const sjfRemaining = sjfProcs.filter((_, i) => !sjfDone[i]);
+      const rrRemaining = rrProcs.filter(p => p.remaining > 0);
+      
+      let nextArrival = Infinity;
+      if (sjfRemaining.length > 0) {
+        nextArrival = Math.min(nextArrival, ...sjfRemaining.map(p => p.arrival));
+      }
+      if (rrRemaining.length > 0) {
+        nextArrival = Math.min(nextArrival, ...rrRemaining.map(p => p.arrival));
+      }
+      
+      if (nextArrival === Infinity) break;
+      time = Math.max(time, nextArrival);
     }
   }
+
 
   return {
     results: results.sort((a, b) => a.pid - b.pid),
