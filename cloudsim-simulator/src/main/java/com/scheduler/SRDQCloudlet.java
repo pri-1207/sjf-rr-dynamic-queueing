@@ -23,6 +23,7 @@ public class SRDQCloudlet extends Cloudlet {
     private long remaining;        // remaining MI for RR slicing
     private double startTime;      // broker-computed start time
     private double finishTime;     // broker-computed finish time
+    private double lastQuantum;    // q_i(j-1): quantum used in previous round (paper Eq.1)
 
     /**
      * Creates an SRDQCloudlet.
@@ -102,6 +103,9 @@ public class SRDQCloudlet extends Cloudlet {
     public void setSrdqFinishTime(double finishTime) {
         this.finishTime = finishTime;
     }
+
+    public double getLastQuantum() { return lastQuantum; }
+    public void setLastQuantum(double lastQuantum) { this.lastQuantum = lastQuantum; }
 
     /**
      * Burst time in MI (convenience alias for getCloudletLength()).
