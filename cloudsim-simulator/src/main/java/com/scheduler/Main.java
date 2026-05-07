@@ -9,8 +9,10 @@ import org.cloudbus.cloudsim.provisioners.RamProvisionerSimple;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * SRDQ CloudSim Simulation Runner.
@@ -118,20 +120,34 @@ public class Main {
             broker.runSRDQSchedule(cloudletList, VM_MIPS);
 
             // ── 7. Submit cloudlets to CloudSim and bind to VMs ────
+            // Distribute cloudlets across VMs in round-robin order, following
+            // the SRDQ scheduled sequence (not raw cloudlet ID order).
             List<Cloudlet> baseList = new ArrayList<Cloudlet>(cloudletList);
             broker.submitCloudletList(baseList);
-            for (SRDQCloudlet cl : cloudletList) {
-                broker.bindCloudletToVm(cl.getCloudletId(), vmList.get(0).getId());
+
+            // Build a map from cloudletId -> VM index using scheduled order
+            List<SRDQBroker.ScheduleResult> scheduledOrder = broker.getResults();
+            for (int i = 0; i < scheduledOrder.size(); i++) {
+                int cloudletId = scheduledOrder.get(i).cloudletId;
+                int vmIndex    = i % vmList.size();   // round-robin across VMs
+                broker.bindCloudletToVm(cloudletId, vmList.get(vmIndex).getId());
             }
 
             // ── 8. Start Simulation ────────────────────────────────
             CloudSim.startSimulation();
             CloudSim.stopSimulation();
 
-            // ── 9. Print Results ───────────────────────────────────
+            // ── 9. Collect actual CloudSim execution times per cloudlet ──
+            // Build a map: cloudletId -> Cloudlet (with real execStartTime / finishTime)
+            Map<Integer, Cloudlet> actualTimes = new HashMap<>();
+            for (Cloudlet cl : broker.getCloudletReceivedList()) {
+                actualTimes.put(cl.getCloudletId(), cl);
+            }
+
+            // ── 10. Print Results ──────────────────────────────────
             printScheduleTrace(broker);
-            printResultsTable(broker);
-            printSummary(broker);
+            printResultsTable(broker, cloudletList, actualTimes);
+            printSummary(broker, cloudletList, actualTimes);
 
         } catch (Exception e) {
             System.err.println("Simulation error: " + e.getMessage());
@@ -253,52 +269,81 @@ public class Main {
     }
 
     /**
-     * Prints the per-cloudlet results table.
+     * Prints the per-cloudlet results table using actual CloudSim execution times.
+     * With multiple VMs, cloudlets run in parallel so actual times differ from
+     * the sequential SRDQ algorithm trace.
      */
-    private static void printResultsTable(SRDQBroker broker) {
+    private static void printResultsTable(SRDQBroker broker,
+                                          List<SRDQCloudlet> cloudletList,
+                                          Map<Integer, Cloudlet> actualTimes) {
         System.out.println();
-        System.out.println("┌─── Per-Cloudlet Results ──────────────────────────────────────────────────────────────┐");
+        System.out.println("┌─── Per-Cloudlet Results (actual CloudSim times) ──────────────────────────────────────┐");
         System.out.printf("│ %-5s │ %-7s │ %-9s │ %-5s │ %-7s │ %-7s │ %-7s │ %-7s │ %-7s │ %-12s │%n",
             "CID", "Arrival", "Burst(MI)", "Queue", "Start", "Finish", "TAT", "WT", "RT", "Quantum Used");
         System.out.println("├───────┼─────────┼───────────┼───────┼─────────┼─────────┼─────────┼─────────┼─────────┼──────────────┤");
 
         DecimalFormat df = new DecimalFormat("0.00");
 
+        // Build a lookup from cloudlet ID -> SRDQ metadata (queue assignment, quantum)
+        Map<Integer, SRDQBroker.ScheduleResult> srdqMeta = new HashMap<>();
         for (SRDQBroker.ScheduleResult r : broker.getResults()) {
+            srdqMeta.put(r.cloudletId, r);
+        }
+
+        // Print in cloudlet ID order, using actual CloudSim times
+        for (SRDQCloudlet cl : cloudletList) {
+            int cid = cl.getCloudletId();
+            Cloudlet actual = actualTimes.get(cid);
+            SRDQBroker.ScheduleResult meta = srdqMeta.get(cid);
+
+            // CloudSim times are in seconds; multiply by MIPS to get MI-equivalent units
+            double start  = (actual != null) ? actual.getExecStartTime() * VM_MIPS : (meta != null ? meta.startTime  : 0);
+            double finish = (actual != null) ? actual.getFinishTime()     * VM_MIPS : (meta != null ? meta.finishTime : 0);
+            double tat    = finish - cl.getArrivalTime();
+            double wt     = tat - cl.getBurstMI();
+            double rt     = start - cl.getArrivalTime();
+            String queue  = (meta != null) ? meta.queue : "?";
+            String quantum = (meta != null) ? meta.quantumUsed : "N/A";
+
             System.out.printf("│ %-5d │ %-7d │ %-9d │ %-5s │ %-7s │ %-7s │ %-7s │ %-7s │ %-7s │ %-12s │%n",
-                r.cloudletId,
-                r.arrivalTime,
-                r.burstMI,
-                r.queue,
-                df.format(r.startTime),
-                df.format(r.finishTime),
-                df.format(r.tat),
-                df.format(r.wt),
-                df.format(r.rt),
-                r.quantumUsed);
+                cid,
+                cl.getArrivalTime(),
+                cl.getBurstMI(),
+                queue,
+                df.format(start),
+                df.format(finish),
+                df.format(tat),
+                df.format(wt),
+                df.format(rt),
+                quantum);
         }
 
         System.out.println("└───────┴─────────┴───────────┴───────┴─────────┴─────────┴─────────┴─────────┴─────────┴──────────────┘");
     }
 
     /**
-     * Prints summary averages (TAT, WT, RT) and the threshold used.
+     * Prints summary averages (TAT, WT, RT) using actual CloudSim execution times.
      */
-    private static void printSummary(SRDQBroker broker) {
-        List<SRDQBroker.ScheduleResult> results = broker.getResults();
-        if (results.isEmpty()) {
+    private static void printSummary(SRDQBroker broker,
+                                     List<SRDQCloudlet> cloudletList,
+                                     Map<Integer, Cloudlet> actualTimes) {
+        if (cloudletList.isEmpty()) {
             System.out.println("  No results to summarize.");
             return;
         }
 
         double totalTAT = 0, totalWT = 0, totalRT = 0;
-        for (SRDQBroker.ScheduleResult r : results) {
-            totalTAT += r.tat;
-            totalWT  += r.wt;
-            totalRT  += r.rt;
+        for (SRDQCloudlet cl : cloudletList) {
+            Cloudlet actual = actualTimes.get(cl.getCloudletId());
+            // CloudSim times are in seconds; multiply by MIPS to get MI-equivalent units
+            double start  = (actual != null) ? actual.getExecStartTime() * VM_MIPS : 0;
+            double finish = (actual != null) ? actual.getFinishTime()     * VM_MIPS : 0;
+            totalTAT += finish - cl.getArrivalTime();
+            totalWT  += (finish - cl.getArrivalTime()) - cl.getBurstMI();
+            totalRT  += start  - cl.getArrivalTime();
         }
 
-        int n = results.size();
+        int n = cloudletList.size();
         DecimalFormat df = new DecimalFormat("0.00");
 
         System.out.println();

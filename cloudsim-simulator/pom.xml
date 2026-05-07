@@ -23,14 +23,14 @@
     </properties>
 
     <dependencies>
-        <!-- CloudSim 3.0.3 — NOT on Maven Central; must be installed locally.
-             See README.md for download and placement instructions. -->
+        <!-- CloudSim 3.0.3 — installed to local Maven repo via:
+             mvn install:install-file -Dfile=lib/cloudsim-3.0.3.jar \
+               -DgroupId=org.cloudbus.cloudsim -DartifactId=cloudsim \
+               -Dversion=3.0.3 -Dpackaging=jar -->
         <dependency>
             <groupId>org.cloudbus.cloudsim</groupId>
             <artifactId>cloudsim</artifactId>
             <version>3.0.3</version>
-            <scope>system</scope>
-            <systemPath>${project.basedir}/lib/cloudsim-3.0.3.jar</systemPath>
         </dependency>
 
         <!-- Required by CloudSim 3.0.3 -->
